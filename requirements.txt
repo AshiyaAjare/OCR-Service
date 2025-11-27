@@ -1,0 +1,11 @@
+fastapi
+uvicorn[standard]
+python-multipart
+
+pdfplumber
+pdf2image
+pytesseract
+Pillow
+
+httpx
+pdfminer.six==20250324
