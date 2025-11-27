@@ -5,7 +5,7 @@ class Settings:
     def __init__(self) -> None:
         # Ollama base URL & model name
         self.OLLAMA_BASE_URL: str = os.getenv(
-            "OLLAMA_BASE_URL", "http://localhost:11434"
+            "OLLAMA_BASE_URL", "http://192.168.2.23:11435"
         )
         self.OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL", "mistral")
 

@@ -1,3 +1,4 @@
+from PIL.Image import logger
 import httpx
 from app.config import settings
 
@@ -18,7 +19,7 @@ async def call_ollama_mistral(prompt: str) -> str:
                 "content": (
                     "You are an assistant that reads text extracted from PDFs "
                     "and returns concise, well-structured answers. "
-                    "If user asks for JSON, respond with STRICT JSON."
+                    "Response should strictly be in JSON format only."
                 ),
             },
             {
@@ -28,10 +29,15 @@ async def call_ollama_mistral(prompt: str) -> str:
         ],
     }
 
-    async with httpx.AsyncClient(timeout=120.0) as client:
-        resp = await client.post(url, json=payload)
-        resp.raise_for_status()
-        data = resp.json()
+    async with httpx.AsyncClient(timeout=6000.0) as client:
+        try:
+            resp = await client.post(url, json=payload)
+            resp.raise_for_status()
+            data = resp.json()
+        except httpx.ReadTimeout:
+            logger.exception("Timeout calling Ollama/Mistral")
+            raise  # re-raise and handle in the route
+
 
     # Ollama /api/chat returns:
     # { "message": { "role": "assistant", "content": "..." }, ... }
