@@ -9,3 +9,4 @@ Pillow
 
 httpx
 pdfminer.six==20250324
+python-dotenv
