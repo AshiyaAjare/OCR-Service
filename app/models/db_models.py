@@ -4,6 +4,7 @@ from sqlalchemy import Column, Integer, String, Text, DateTime, Boolean, JSON
 from sqlalchemy.sql import func
 from app.database import Base
 from app.config import settings
+from sqlalchemy import Date, Float
 
 
 # Base class with table prefix support
@@ -70,6 +71,17 @@ class ExtractedDocumentModel(PrefixedBase):
     file_path = Column(String(1000), nullable=False)
     file_type = Column(String(50), nullable=False)  # e.g., 'pdf', 'html'
     
+    # New top-level metadata columns (nullable, some indexed for querying)
+    ticker = Column(String(100), nullable=True, index=True)  # e.g., STEELCAS
+    company_name = Column(String(500), nullable=True, index=True)
+    report_date = Column(Date, nullable=True)  # YYYY-MM-DD
+    period = Column(String(100), nullable=True)  # e.g., Q2 2025, H1 2025
+    document_type = Column(String(100), nullable=True, index=True)  # results, press_release, etc.
+    source_domain = Column(String(255), nullable=True, index=True)  # e.g., bseindia.com
+    language = Column(String(10), nullable=True)  # e.g., en
+    ocr_confidence = Column(Float, nullable=True)  # 0..1
+    ingestion_method = Column(String(50), nullable=True, index=True)  # pdf, web_scrape
+
     # Extraction results
     num_pages = Column(Integer, nullable=True)
     merged_text = Column(Text, nullable=True)

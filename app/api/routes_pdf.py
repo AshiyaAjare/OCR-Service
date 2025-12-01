@@ -87,6 +87,16 @@ def get_extracted_document_status(
         "num_pages": doc.num_pages,
         "is_processed": doc.is_processed,
         "processing_status": doc.processing_status,
+        #top-level metadata fields
+        "ticker": doc.ticker,
+        "company_name": doc.company_name,
+        "report_date": doc.report_date.isoformat() if doc.report_date else None,
+        "period": doc.period,
+        "document_type": doc.document_type,
+        "source_domain": doc.source_domain,
+        "language": doc.language,
+        "ocr_confidence": doc.ocr_confidence,
+        "ingestion_method": doc.ingestion_method,
     }
 
     if doc.is_processed and doc.processing_status == "completed":
@@ -105,8 +115,17 @@ def get_extracted_document_status(
 async def extract_with_llm(
     file: UploadFile = File(...),
     instruction: str = Form(
-        "Summarize the key points and return a short JSON with fields "
-        "company_name, period, key_financials, dividends, notes."
+        default=(
+            "You are analyzing a financial or regulatory PDF. "
+            "Return a single JSON object with these top-level keys:\n"
+            "- ticker, company_name, report_date (YYYY-MM-DD), period, document_type,\n"
+            "- source_domain, language, ocr_confidence (0..1), ingestion_method,\n"
+            "- tables, kv_pairs, headings, detected_tickers, raw_dates_found.\n"
+            "Only output valid JSON. Do not include explanations or comments."
+        ),
+        description=(
+            "Instruction passed to the LLM. Override if you need a custom schema."
+        ),
     ),
 ):
     """

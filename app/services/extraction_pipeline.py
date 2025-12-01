@@ -17,6 +17,9 @@ from app.database import SessionLocal
 from app.models.db_models import ExtractedDocumentModel
 from app.services.ollama_client import call_ollama_mistral
 
+import json
+from urllib.parse import urlparse
+
 
 async def extract_pdf_dual(file_path: str) -> ExtractionResult:
     """
@@ -100,10 +103,17 @@ async def _extract_with_llm(file_path: str, instruction: str) -> Dict[str, Any]:
 
     llm_response = await call_ollama_mistral(llm_prompt)
 
+    llm_structured: Optional[Dict[str, Any]] = None
+    try:
+        llm_structured = json.loads(llm_response)
+    except (TypeError, ValueError):
+        llm_structured = None
+
     return {
         "extraction": extraction,
         "llm_instruction": instruction,
         "llm_raw_response": llm_response,
+        "llm_structured": llm_structured,
     }
 
 
@@ -122,8 +132,32 @@ def process_pdf_from_file(
     meta = meta or {}
     instruction = meta.get(
         "llm_instruction",
-        "Summarize the key points and return a short JSON with fields "
-        "company_name, period, key_financials, dividends, notes.",
+        (
+            "You are analyzing a financial or regulatory PDF. "
+            "Return a single JSON object with these top-level keys:\n"
+            "- ticker: string or null (e.g., 'STEELCAS')\n"
+            "- company_name: string or null\n"
+            "- report_date: string or null in ISO format 'YYYY-MM-DD'\n"
+            "- period: string or null (e.g., 'Q2 2025', 'H1 2025')\n"
+            "- document_type: string or null (e.g., 'results', 'press_release', "
+            "'board_outcome', 'annual_report')\n"
+            "- source_domain: string or null (e.g., 'bseindia.com')\n"
+            "- language: string or null (e.g., 'en')\n"
+            "- ocr_confidence: number or null between 0 and 1 (estimate if needed)\n"
+            "- ingestion_method: string or null (e.g., 'pdf', 'web_scrape')\n"
+            "- tables: array of objects, each with fields like "
+            "{'page': int, 'title': string|null, 'summary': string, 'headers': [...]} \n"
+            "- kv_pairs: array or object capturing key metrics, for example "
+            "[{'key': 'net_sales', 'value': 11060.31, 'unit': 'INR_lakhs', "
+            "'period': '30-09-2025'}]\n"
+            "- headings: array of objects like "
+            "{'page': int, 'heading': string, 'level': int|null}\n"
+            "- detected_tickers: array of objects like "
+            "{'ticker': string, 'confidence': number 0..1}\n"
+            "- raw_dates_found: array of objects like "
+            "{'raw': string, 'normalized': string|null}\n\n"
+            "Only output valid JSON. Do not include explanations or comments."
+        ),
     )
 
     db: Session = SessionLocal()
@@ -135,6 +169,16 @@ def process_pdf_from_file(
         is_processed=False,
         processing_status="processing",
     )
+    ingestion_method = meta.get("ingestion_method", "pdf")
+    doc.ingestion_method = ingestion_method
+
+    source_url = meta.get("source_url")
+    if source_url:
+        try:
+            parsed = urlparse(source_url)
+            doc.source_domain = parsed.netloc or None
+        except Exception:
+            doc.source_domain = None
     try:
         db.add(doc)
         db.commit()
@@ -147,16 +191,78 @@ def process_pdf_from_file(
 
     try:
         # Run dual extraction + LLM, mirroring /extract-with-llm
-        result = asyncio.run(_extract_with_llm(file_path, instruction))
+        try:
+            result = asyncio.run(_extract_with_llm(file_path, instruction))
+            llm_error = None
+        except Exception as e:
+            # If LLM (Ollama) is unavailable, fall back to extraction without LLM
+            llm_error = str(e)
+            extraction = asyncio.run(extract_pdf_dual(file_path))
+            result = {
+                "extraction": extraction,
+                "llm_instruction": instruction,
+                "llm_raw_response": None,
+                "llm_structured": None,
+            }
+
         extraction = result["extraction"]
+        llm_structured = result.get("llm_structured") or {}
 
         # Update document record with results
         doc.num_pages = extraction.num_pages
         doc.merged_text = extraction.merged_text
+
+        doc.ticker = llm_structured.get("ticker")
+        doc.company_name = llm_structured.get("company_name")
+        report_date_str = llm_structured.get("report_date")
+        if report_date_str:
+            from datetime import date
+            try:
+                parts = report_date_str.split("-")
+                if len(parts) == 3:
+                    y, m, d = map(int, parts)
+                    doc.report_date = date(y, m, d)
+            except Exception:
+                doc.report_date = None
+        doc.period = llm_structured.get("period")
+        doc.document_type = llm_structured.get("document_type") or doc.document_type
+        # Prefer LLM language if present
+        doc.language = llm_structured.get("language") or doc.language
+
+        ocr_conf = llm_structured.get("ocr_confidence")
+        try:
+            doc.ocr_confidence = float(ocr_conf) if ocr_conf is not None else doc.ocr_confidence
+        except (TypeError, ValueError):
+            pass
+
+        # ingestion_method / source_domain may already be set from meta/source_url
+        if llm_structured.get("ingestion_method"):
+            doc.ingestion_method = llm_structured.get("ingestion_method")
+
+        # Build rich extraction_metadata JSON
         doc.extraction_metadata = {
+            # Existing keys
             "meta": meta,
             "llm_instruction": result["llm_instruction"],
             "llm_raw_response": result["llm_raw_response"],
+            "llm_error": llm_error,
+            "llm_fallback_used": llm_error is not None,
+            "tables": llm_structured.get("tables", []),
+            "kv_pairs": llm_structured.get("kv_pairs", []),
+            "headings": llm_structured.get("headings", []),
+            "detected_tickers": llm_structured.get("detected_tickers", []),
+            "raw_dates_found": llm_structured.get("raw_dates_found", []),
+            "scalar_metadata": {
+                "ticker": doc.ticker,
+                "company_name": doc.company_name,
+                "report_date": report_date_str,
+                "period": doc.period,
+                "document_type": doc.document_type,
+                "source_domain": doc.source_domain,
+                "language": doc.language,
+                "ocr_confidence": doc.ocr_confidence,
+                "ingestion_method": doc.ingestion_method,
+            },
         }
         doc.is_processed = True
         doc.processing_status = "completed"
