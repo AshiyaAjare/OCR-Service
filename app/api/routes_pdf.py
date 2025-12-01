@@ -78,7 +78,7 @@ def get_extracted_document_status(
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
 
-    return {
+    response = {
         "id": doc.id,
         "source_email_id": doc.source_email_id,
         "source_url": doc.source_url,
@@ -88,6 +88,13 @@ def get_extracted_document_status(
         "is_processed": doc.is_processed,
         "processing_status": doc.processing_status,
     }
+
+    if doc.is_processed and doc.processing_status == "completed":
+        response["extraction result"]={
+            "merged_text": doc.merged_text,
+            "extraction_metadata": doc.extraction_metadata
+        }
+    return response
 
 
 @router.post(
