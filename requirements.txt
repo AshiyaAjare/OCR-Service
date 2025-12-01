@@ -10,6 +10,8 @@ Pillow
 httpx
 pdfminer.six==20250324
 python-dotenv
+requests
+beautifulsoup4
 
 # Database
 sqlalchemy==1.4.53

@@ -1,13 +1,16 @@
 import os
 import uuid
-from fastapi import APIRouter, UploadFile, File, HTTPException, Form
+from fastapi import APIRouter, UploadFile, File, HTTPException, Form, Depends
+from sqlalchemy.orm import Session
 
 from app.config import settings
+from app.database import get_db
 from app.models.schemas import (
     ExtractionResult,
     FullAnalysisResponse,
     LLMAnalysisResult,
 )
+from app.models.db_models import ExtractedDocumentModel
 from app.services.extraction_pipeline import extract_pdf_dual
 from app.services.ollama_client import call_ollama_mistral
 
@@ -57,6 +60,34 @@ async def extract_basic(file: UploadFile = File(...)):
         # Optional: clean up uploaded file
         if os.path.exists(file_path):
             os.remove(file_path)
+
+
+@router.get(
+    "/extracted-document/{document_id}",
+    summary="Get status and basic info for an extracted document",
+)
+def get_extracted_document_status(
+    document_id: int,
+    db: Session = Depends(get_db),
+):
+    doc = (
+        db.query(ExtractedDocumentModel)
+        .filter(ExtractedDocumentModel.id == document_id)
+        .first()
+    )
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    return {
+        "id": doc.id,
+        "source_email_id": doc.source_email_id,
+        "source_url": doc.source_url,
+        "file_path": doc.file_path,
+        "file_type": doc.file_type,
+        "num_pages": doc.num_pages,
+        "is_processed": doc.is_processed,
+        "processing_status": doc.processing_status,
+    }
 
 
 @router.post(

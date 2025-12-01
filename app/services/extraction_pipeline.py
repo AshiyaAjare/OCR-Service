@@ -1,5 +1,7 @@
 import asyncio
-from typing import List
+from typing import List, Optional, Dict, Any
+
+from sqlalchemy.orm import Session
 
 from app.models.schemas import (
     ExtractionResult,
@@ -11,6 +13,8 @@ from app.services.text_normalizer import normalize_text_to_lines
 from app.services.pdf_text_extractor import extract_text_from_pdf_pages
 from app.services.pdf_image_extractor import render_pdf_to_images
 from app.services.ocr_service import run_ocr_on_images
+from app.database import SessionLocal
+from app.models.db_models import ExtractedDocumentModel
 
 
 async def extract_pdf_dual(file_path: str) -> ExtractionResult:
@@ -78,3 +82,60 @@ async def extract_pdf_dual(file_path: str) -> ExtractionResult:
         merged_text=merged_text,
         normalized_pages=normalized_pages,
     )
+
+
+def process_pdf_from_file(
+    file_path: str,
+    meta: Optional[Dict[str, Any]] = None,
+) -> int:
+    """
+    Synchronous wrapper used by link_resolver_service.
+
+    - Accepts a local PDF path.
+    - Optionally takes a meta dict (e.g. source_url, source_email_id).
+    - Persists an ExtractedDocumentModel row with status updates.
+    - Runs the dual extraction coroutine and returns the document ID.
+    """
+    meta = meta or {}
+
+    db: Session = SessionLocal()
+    doc = ExtractedDocumentModel(
+        source_email_id=meta.get("source_email_id"),
+        source_url=meta.get("source_url"),
+        file_path=file_path,
+        file_type="pdf",
+        is_processed=False,
+        processing_status="processing",
+    )
+    try:
+        db.add(doc)
+        db.commit()
+        db.refresh(doc)
+        document_id = doc.id
+    except Exception:
+        db.rollback()
+        db.close()
+        raise
+
+    try:
+        # Run the heavy extraction work
+        extraction_result = asyncio.run(extract_pdf_dual(file_path))
+
+        # Update document record with results
+        doc.num_pages = extraction_result.num_pages
+        doc.merged_text = extraction_result.merged_text
+        doc.extraction_metadata = {"meta": meta}
+        doc.is_processed = True
+        doc.processing_status = "completed"
+        db.commit()
+    except Exception as e:
+        # Mark as failed
+        doc.processing_status = "failed"
+        doc.is_processed = False
+        doc.extraction_metadata = {"meta": meta, "error": str(e)}
+        db.commit()
+        raise
+    finally:
+        db.close()
+
+    return document_id

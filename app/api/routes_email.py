@@ -10,6 +10,7 @@ from app.services.email_ingestion_service import (
     GmailIngestionService,
     persist_ingested_emails,
 )
+from app.services.link_resolver_service import resolve_and_process_link
 
 router = APIRouter(prefix="/api/v1/email", tags=["email"])
 
@@ -35,3 +36,14 @@ def ingest_emails(
         "fetched": len(emails),
         "created": created,
     }
+
+@router.post("/resolve")
+def resolve_link(url: str):
+    result = resolve_and_process_link(
+        url,
+        meta={
+            "source": "api-test",
+            "source_url": url,
+        },
+    )
+    return result
