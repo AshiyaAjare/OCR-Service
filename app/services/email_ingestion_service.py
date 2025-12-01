@@ -9,7 +9,9 @@ from dataclasses import dataclass
 import re
 
 from app.config import settings
-
+from sqlalchemy.orm import Session
+from app.database import SessionLocal
+from app.models.db_models import IngestedEmailModel
 
 # ---------- 1. DATA MODELS ----------
 
@@ -110,7 +112,50 @@ def _get_email_bodies(msg: Message) -> Tuple[str, Optional[str]]:
 
     return text_body.strip(), html_body
 
+def persist_ingested_emails(emails: List[IngestedEmail], db: Optional[Session]=None, commit: bool = True) -> int:
+    """
+    Persist a list of IngestedEmail objects into the database.
+    If no db is provided, this method creates its own SessionLocal to manage.
+    """
+    own_session = False
+    if db is None:
+        db = SessionLocal()
+        own_session = True
 
+    created_count = 0
+    try:
+        for email_obj in emails:
+            existing = (
+                db.query(IngestedEmailModel)
+                .filter(IngestedEmailModel.message_id == email_obj.message_id)
+                .first()
+            )
+            if existing:
+                continue
+
+            record = IngestedEmailModel(
+                message_id = email_obj.message_id or "",
+                subject = email_obj.subject,
+                sender = email_obj.sender,
+                date=email_obj.date,
+                body_text=email_obj.body_text,
+                body_html = email_obj.body_html,
+                urls=email_obj.urls,
+            )
+            db.add(record)
+            created_count+=1
+
+        if commit:
+            db.commit()
+
+        return created_count
+    except Exception:
+        if commit:
+            db.rollback()
+        raise
+    finally:
+        if own_session:
+            db.close()
 # ---------- 3. MAIN SERVICE CLASS ----------
 
 class GmailIngestionService:
@@ -147,7 +192,7 @@ class GmailIngestionService:
 
     def fetch_recent_emails(
         self,
-        max_emails: int = 20,
+        max_emails: int = 3,
         from_filter: Optional[str] = None,
         subject_contains: Optional[str] = None,
         only_unseen: bool = False,
