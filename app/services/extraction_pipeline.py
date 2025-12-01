@@ -15,6 +15,7 @@ from app.services.pdf_image_extractor import render_pdf_to_images
 from app.services.ocr_service import run_ocr_on_images
 from app.database import SessionLocal
 from app.models.db_models import ExtractedDocumentModel
+from app.services.ollama_client import call_ollama_mistral
 
 
 async def extract_pdf_dual(file_path: str) -> ExtractionResult:
@@ -83,6 +84,28 @@ async def extract_pdf_dual(file_path: str) -> ExtractionResult:
         normalized_pages=normalized_pages,
     )
 
+async def _extract_with_llm(file_path: str, instruction: str) -> Dict[str, Any]:
+    """
+    Internal helper:
+    - runs dual extraction (extract_pdf_dual)
+    - calls Ollama/Mistral with the merged text
+    """
+    extraction = await extract_pdf_dual(file_path)
+
+    llm_prompt = (
+        f"{instruction}\n\n"
+        "Here is the text extracted from the PDF (both direct parsing and OCR):\n\n"
+        f"{extraction.merged_text}"
+    )
+
+    llm_response = await call_ollama_mistral(llm_prompt)
+
+    return {
+        "extraction": extraction,
+        "llm_instruction": instruction,
+        "llm_raw_response": llm_response,
+    }
+
 
 def process_pdf_from_file(
     file_path: str,
@@ -97,6 +120,11 @@ def process_pdf_from_file(
     - Runs the dual extraction coroutine and returns the document ID.
     """
     meta = meta or {}
+    instruction = meta.get(
+        "llm_instruction",
+        "Summarize the key points and return a short JSON with fields "
+        "company_name, period, key_financials, dividends, notes.",
+    )
 
     db: Session = SessionLocal()
     doc = ExtractedDocumentModel(
@@ -118,13 +146,18 @@ def process_pdf_from_file(
         raise
 
     try:
-        # Run the heavy extraction work
-        extraction_result = asyncio.run(extract_pdf_dual(file_path))
+        # Run dual extraction + LLM, mirroring /extract-with-llm
+        result = asyncio.run(_extract_with_llm(file_path, instruction))
+        extraction = result["extraction"]
 
         # Update document record with results
-        doc.num_pages = extraction_result.num_pages
-        doc.merged_text = extraction_result.merged_text
-        doc.extraction_metadata = {"meta": meta}
+        doc.num_pages = extraction.num_pages
+        doc.merged_text = extraction.merged_text
+        doc.extraction_metadata = {
+            "meta": meta,
+            "llm_instruction": result["llm_instruction"],
+            "llm_raw_response": result["llm_raw_response"],
+        }
         doc.is_processed = True
         doc.processing_status = "completed"
         db.commit()
