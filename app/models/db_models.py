@@ -90,6 +90,11 @@ class ExtractedDocumentModel(PrefixedBase):
     # Processing status
     is_processed = Column(Boolean, default=False, nullable=False)
     processing_status = Column(String(50), nullable=True)
+
+    # Indexing status
+    vector_indexed = Column(Boolean, default=False, nullable=False, index=True)
+    vector_indexed_at = Column(DateTime(timezone=True), nullable=True)
+
     
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)

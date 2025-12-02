@@ -43,5 +43,13 @@ class Settings:
             f"@{self.DATABASE_HOST}:{self.DATABASE_PORT}/{self.DATABASE_NAME}"
         )
 
+        # RAG Configuration
+        self.VECTOR_TABLE = os.getenv("VECTOR_TABLE", "document_vectors")
+        self.RAG_TOP_K = int(os.getenv("RAG_TOP_K", "5"))
+        self.RAG_MAX_CHARS_CONTEXT = int(os.getenv("RAG_MAX_CHARS_CONTEXT", "3000"))
+        self.OLLAMA_EMBED_MODEL = os.getenv("EMBEDDING_MODEL", "nomic-embed-text:latest")
+        self.RAG_LLM_MODEL = os.getenv("RAG_LLM_MODEL", "mistral:latest")
+
+
 
 settings = Settings()

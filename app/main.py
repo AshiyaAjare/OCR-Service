@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from app.api.routes_pdf import router as pdf_router
 from app.api.routes_email import router as email_router
-
+from app.api.routes_rag import router as rag_router
 app = FastAPI(
     title="PDF Dual Extraction Service",
     version="0.1.0",
@@ -10,6 +10,7 @@ app = FastAPI(
 
 app.include_router(pdf_router)
 app.include_router(email_router)
+app.include_router(rag_router)
 
 
 @app.get("/health", tags=["health"])

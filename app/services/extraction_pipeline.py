@@ -18,6 +18,7 @@ from app.database import SessionLocal
 from app.models.db_models import ExtractedDocumentModel
 from app.services.ollama_client import call_ollama_mistral, extract_json_from_text
 from app.services.fallback_extractors import apply_fallback_extractors
+from app.tasks.indexing_tasks import index_document_task
 
 import json
 from urllib.parse import urlparse
@@ -329,6 +330,10 @@ def process_pdf_from_file(
         doc.is_processed = True
         doc.processing_status = "completed"
         db.commit()
+        try:
+            index_document_task.delay(document_id)
+        except Exception as e:
+            logger.exception("Failed to enqueue indexing task for %s: %s", document_id, e)
     except Exception as e:
         # Mark as failed
         doc.processing_status = "failed"
