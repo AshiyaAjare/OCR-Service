@@ -1,5 +1,6 @@
 import asyncio
 from typing import List, Optional, Dict, Any
+import logging
 
 from sqlalchemy.orm import Session
 
@@ -15,10 +16,16 @@ from app.services.pdf_image_extractor import render_pdf_to_images
 from app.services.ocr_service import run_ocr_on_images
 from app.database import SessionLocal
 from app.models.db_models import ExtractedDocumentModel
-from app.services.ollama_client import call_ollama_mistral
+from app.services.ollama_client import call_ollama_mistral, extract_json_from_text
+from app.services.fallback_extractors import apply_fallback_extractors
 
 import json
 from urllib.parse import urlparse
+
+logger = logging.getLogger(__name__)
+
+# Maximum characters to send to LLM (approximate token limit: ~100k chars ≈ 25k tokens)
+MAX_LLM_INPUT_CHARS = 100000
 
 
 async def extract_pdf_dual(file_path: str) -> ExtractionResult:
@@ -87,33 +94,80 @@ async def extract_pdf_dual(file_path: str) -> ExtractionResult:
         normalized_pages=normalized_pages,
     )
 
-async def _extract_with_llm(file_path: str, instruction: str) -> Dict[str, Any]:
+def truncate_text_for_llm(text: str, max_chars: int = MAX_LLM_INPUT_CHARS) -> str:
+    """
+    Truncate text to prevent token limit issues.
+    Tries to truncate at sentence boundaries when possible.
+    """
+    if len(text) <= max_chars:
+        return text
+    
+    # Try to truncate at a sentence boundary
+    truncated = text[:max_chars]
+    last_period = truncated.rfind('.')
+    last_newline = truncated.rfind('\n')
+    
+    # Prefer truncating at paragraph boundary, then sentence
+    if last_newline > max_chars * 0.8:  # If we can keep 80% of content
+        return text[:last_newline] + "\n\n[Text truncated due to length...]"
+    elif last_period > max_chars * 0.8:
+        return text[:last_period + 1] + "\n\n[Text truncated due to length...]"
+    else:
+        return truncated + "\n\n[Text truncated due to length...]"
+
+
+async def _extract_with_llm(file_path: str, instruction: str, source_url: Optional[str] = None) -> Dict[str, Any]:
     """
     Internal helper:
     - runs dual extraction (extract_pdf_dual)
-    - calls Ollama/Mistral with the merged text
+    - calls Ollama/Mistral with the merged text (truncated if needed)
+    - uses robust JSON extraction and fallback extractors if LLM fails
     """
     extraction = await extract_pdf_dual(file_path)
+
+    # Truncate text if too long to prevent token limit issues
+    truncated_text = truncate_text_for_llm(extraction.merged_text)
+    was_truncated = len(extraction.merged_text) > len(truncated_text)
 
     llm_prompt = (
         f"{instruction}\n\n"
         "Here is the text extracted from the PDF (both direct parsing and OCR):\n\n"
-        f"{extraction.merged_text}"
+        f"{truncated_text}"
     )
 
-    llm_response = await call_ollama_mistral(llm_prompt)
-
+    llm_response: Optional[str] = None
     llm_structured: Optional[Dict[str, Any]] = None
+    parse_error: Optional[str] = None
+
     try:
-        llm_structured = json.loads(llm_response)
-    except (TypeError, ValueError):
-        llm_structured = None
+        llm_response = await call_ollama_mistral(llm_prompt, temperature=0.0, top_p=0.1)
+        
+        # Try robust JSON extraction
+        llm_structured = extract_json_from_text(llm_response)
+        
+        if llm_structured is None:
+            parse_error = "Failed to extract valid JSON from LLM response"
+            logger.warning(f"JSON extraction failed. Raw response: {llm_response[:500]}...")
+    except Exception as e:
+        parse_error = str(e)
+        logger.exception(f"Error calling LLM: {e}")
+
+    # If LLM extraction failed, use fallback extractors
+    if llm_structured is None:
+        logger.info("Using fallback extractors due to LLM failure")
+        llm_structured = apply_fallback_extractors(extraction.merged_text, source_url)
+        # Mark that fallback was used
+        llm_structured['_fallback_used'] = True
+    else:
+        llm_structured['_fallback_used'] = False
 
     return {
         "extraction": extraction,
         "llm_instruction": instruction,
         "llm_raw_response": llm_response,
         "llm_structured": llm_structured,
+        "llm_parse_error": parse_error,
+        "text_was_truncated": was_truncated,
     }
 
 
@@ -192,17 +246,23 @@ def process_pdf_from_file(
     try:
         # Run dual extraction + LLM, mirroring /extract-with-llm
         try:
-            result = asyncio.run(_extract_with_llm(file_path, instruction))
-            llm_error = None
+            result = asyncio.run(_extract_with_llm(file_path, instruction, source_url))
+            llm_error = result.get("llm_parse_error")
         except Exception as e:
             # If LLM (Ollama) is unavailable, fall back to extraction without LLM
             llm_error = str(e)
+            logger.exception(f"LLM call failed, using fallback extractors: {e}")
             extraction = asyncio.run(extract_pdf_dual(file_path))
+            # Use fallback extractors
+            llm_structured = apply_fallback_extractors(extraction.merged_text, source_url)
+            llm_structured['_fallback_used'] = True
             result = {
                 "extraction": extraction,
                 "llm_instruction": instruction,
                 "llm_raw_response": None,
-                "llm_structured": None,
+                "llm_structured": llm_structured,
+                "llm_parse_error": llm_error,
+                "text_was_truncated": False,
             }
 
         extraction = result["extraction"]
@@ -240,13 +300,15 @@ def process_pdf_from_file(
             doc.ingestion_method = llm_structured.get("ingestion_method")
 
         # Build rich extraction_metadata JSON
+        fallback_used = llm_structured.get("_fallback_used", False)
         doc.extraction_metadata = {
             # Existing keys
             "meta": meta,
             "llm_instruction": result["llm_instruction"],
             "llm_raw_response": result["llm_raw_response"],
-            "llm_error": llm_error,
-            "llm_fallback_used": llm_error is not None,
+            "llm_error": llm_error or result.get("llm_parse_error"),
+            "llm_fallback_used": fallback_used,
+            "text_was_truncated": result.get("text_was_truncated", False),
             "tables": llm_structured.get("tables", []),
             "kv_pairs": llm_structured.get("kv_pairs", []),
             "headings": llm_structured.get("headings", []),

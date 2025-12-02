@@ -11,8 +11,9 @@ from app.models.schemas import (
     LLMAnalysisResult,
 )
 from app.models.db_models import ExtractedDocumentModel
-from app.services.extraction_pipeline import extract_pdf_dual
-from app.services.ollama_client import call_ollama_mistral
+from app.services.extraction_pipeline import extract_pdf_dual, truncate_text_for_llm
+from app.services.ollama_client import call_ollama_mistral, extract_json_from_text
+from app.services.fallback_extractors import apply_fallback_extractors
 
 router = APIRouter(prefix="/api/v1/pdf", tags=["pdf"])
 
@@ -142,17 +143,28 @@ async def extract_with_llm(
     try:
         extraction = await extract_pdf_dual(file_path)
 
+        # Truncate text if too long to prevent token limit issues
+        truncated_text = truncate_text_for_llm(extraction.merged_text)
+
         llm_prompt = (
             f"{instruction}\n\n"
             "Here is the text extracted from the PDF (both direct parsing and OCR):\n\n"
-            f"{extraction.merged_text}"
+            f"{truncated_text}"
         )
 
-        llm_response = await call_ollama_mistral(llm_prompt)
+        llm_response = None
+        llm_structured = None
+        try:
+            llm_response = await call_ollama_mistral(llm_prompt, temperature=0.0, top_p=0.1)
+            # Try robust JSON extraction
+            llm_structured = extract_json_from_text(llm_response)
+        except Exception as e:
+            # If LLM fails, use fallback extractors
+            llm_structured = apply_fallback_extractors(extraction.merged_text, None)
 
         llm_analysis = LLMAnalysisResult(
             instruction=instruction,
-            raw_response=llm_response,
+            raw_response=llm_response or "LLM call failed, used fallback extractors",
         )
 
         return FullAnalysisResponse(
