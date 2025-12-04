@@ -87,6 +87,9 @@ class ExtractedDocumentModel(PrefixedBase):
     merged_text = Column(Text, nullable=True)
     extraction_metadata = Column(JSON, nullable=True)  # Store full extraction result as JSON
     
+    # Broker Estimate
+    broker_estimate = Column(Float, nullable=True, index=True)
+    
     # Processing status
     is_processed = Column(Boolean, default=False, nullable=False)
     processing_status = Column(String(50), nullable=True)

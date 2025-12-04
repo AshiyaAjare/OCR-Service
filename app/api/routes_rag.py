@@ -1,5 +1,5 @@
 # app/api/routes_rag.py
-from typing import Any, List
+from typing import Any, List, Optional
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from app.services.rag.rag_pipeline import answer_question_with_rag
@@ -12,6 +12,7 @@ class QueryRequest(BaseModel):
 
 class QueryResponse(BaseModel):
     answer: Any  # now allows the parsed JSON object
+    summary: Optional[str] = None
     sources: List[str]  # new field for the parsed SOURCES list
     provenance: list
     used_chunks_count: int

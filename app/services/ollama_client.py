@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 # Default model/base url come from settings (you already import settings above)
 DEFAULT_EMBED_MODEL = os.getenv("EMBEDDING_MODEL", "nomic-embed-text:latest")
-DEFAULT_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+DEFAULT_BASE_URL = os.getenv("OLLAMA_BASE_URL")
 DEFAULT_API_KEY = os.getenv("OLLAMA_API_KEY", None)
 
 
@@ -279,3 +279,46 @@ def call_ollama_mistral_sync(prompt: str, temperature: float = 0.0, top_p: float
             resp.raise_for_status()
             data = resp.json()
         return data.get("message", {}).get("content", "")
+
+def call_ollama_chat_sync(
+    prompt: str,
+    model: str,
+    system_prompt: str= "",
+    temperature: float = 0.0,
+    top_p: float = 0.9,
+    timeout: float = 6000.0,
+) -> str:
+    """
+    Generating natural langugage summaries for chat based answers
+    """
+    base_url = os.getenv("OLLAMA_BASE_URL")
+    endpoint = f"{base_url}/api/chat"
+    headers = {"Content-Type": "application/json"}
+    payload = {
+        "model": model,
+        "messages": [
+            {
+                "role": "system",
+                "content": system_prompt or "You are a helpful assistant.",
+            },
+            {
+                "role" : "user",
+                "content" : prompt,
+            },
+        ],
+        "options": {
+            "temperature" : temperature,
+            "top_p": top_p,
+        },
+        "stream": False,
+    }
+
+    try:
+        with httpx.Client(timeout=timeout) as client:
+            resp = client.post(endpoint, json=payload, headers=headers)
+            resp.raise_for_status()
+            data = resp.json()
+    except httpx.RequestError as e:
+        logger.exception(f"Request error calling Ollama chat: {e}")
+        raise
+    return data.get("message", {}).get("content", "").strip()
