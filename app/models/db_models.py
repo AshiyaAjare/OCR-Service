@@ -1,7 +1,7 @@
 # app/models/db_models.py
 
 from sqlalchemy import Column, Integer, String, Text, DateTime, Boolean, JSON
-from sqlalchemy.sql import func
+from sqlalchemy.sql import func, text
 from app.database import Base
 from app.config import settings
 from sqlalchemy import Date, Float
@@ -88,6 +88,15 @@ class ExtractedDocumentModel(PrefixedBase):
     extraction_metadata = Column(JSON, nullable=True)  # Store full extraction result as JSON
     
     # Broker Estimate
+    # DB column: stores the numeric equity target price value for querying/indexing
+    # Rich details stored in extraction_metadata["broker_estimate_detail"] with:
+    #   - value: float (same as broker_estimate column)
+    #   - estimate_type: str (e.g., "target_price")
+    #   - currency: str (e.g., "INR")
+    #   - as_of_date: str (e.g., "2025-12-04")
+    #   - broker_name: str (e.g., "ICICI Securities")
+    #   - rating: str (e.g., "HOLD")
+    #   - horizon: str (e.g., "12M (I-Sec rating framework)")
     broker_estimate = Column(Float, nullable=True, index=True)
     
     # Processing status
@@ -95,7 +104,7 @@ class ExtractedDocumentModel(PrefixedBase):
     processing_status = Column(String(50), nullable=True)
 
     # Indexing status
-    vector_indexed = Column(Boolean, default=False, nullable=False, index=True)
+    vector_indexed = Column(Boolean, server_default=text('false'), nullable=False, index=True)
     vector_indexed_at = Column(DateTime(timezone=True), nullable=True)
 
     

@@ -194,6 +194,218 @@ def extract_detected_tickers(text: str) -> List[Dict[str, Any]]:
     return tickers
 
 
+def extract_broker_estimate(text: str) -> Optional[float]:
+    """
+    Extract broker estimate (earnings/revenue estimate) from text.
+    Looks for patterns like:
+    - "broker estimate: 1234.56"
+    - "analyst estimate: 1234.56"
+    - "consensus estimate: 1234.56"
+    - "estimated: 1234.56"
+    - Numbers near keywords like "estimate", "forecast", "projection"
+    """
+    if not text:
+        return None
+    
+    # Common patterns for broker/analyst estimates
+    patterns = [
+        # Direct patterns with colons or equals
+        r'(?:broker|analyst|consensus|market)\s+estimate[s]?[:\s]+(?:Rs\.?|INR|₹)?\s*([\d,]+\.?\d*)',
+        r'estimate[s]?[:\s]+(?:Rs\.?|INR|₹)?\s*([\d,]+\.?\d*)',
+        r'estimated[:\s]+(?:Rs\.?|INR|₹)?\s*([\d,]+\.?\d*)',
+        r'forecast[s]?[:\s]+(?:Rs\.?|INR|₹)?\s*([\d,]+\.?\d*)',
+        r'projection[s]?[:\s]+(?:Rs\.?|INR|₹)?\s*([\d,]+\.?\d*)',
+        # Patterns with numbers before estimate keywords
+        r'(?:Rs\.?|INR|₹)?\s*([\d,]+\.?\d*)\s+(?:crore|lakh|million|billion)?\s*(?:broker|analyst|consensus)?\s+estimate',
+        # Patterns in tables or structured formats
+        r'estimate[:\s]*\n?\s*(?:Rs\.?|INR|₹)?\s*([\d,]+\.?\d*)',
+    ]
+    
+    for pattern in patterns:
+        matches = re.finditer(pattern, text, re.IGNORECASE | re.MULTILINE)
+        for match in matches:
+            value_str = match.group(1).replace(',', '')  # Remove commas
+            try:
+                value = float(value_str)
+                # Filter out obviously wrong values (too small or too large)
+                # Assuming estimates are typically in reasonable ranges (e.g., 0.01 to 1e15)
+                if value > 0 and value < 1e15:
+                    return value
+            except (ValueError, TypeError):
+                continue
+    
+    # Try to find numbers near estimate-related keywords (context-based)
+    estimate_keywords = [
+        r'broker\s+estimate',
+        r'analyst\s+estimate',
+        r'consensus\s+estimate',
+        r'estimated\s+(?:revenue|earnings|profit|sales)',
+        r'forecast\s+(?:revenue|earnings|profit|sales)',
+    ]
+    
+    for keyword_pattern in estimate_keywords:
+        # Find the keyword
+        keyword_matches = re.finditer(keyword_pattern, text, re.IGNORECASE)
+        for keyword_match in keyword_matches:
+            # Look for numbers in the next 100 characters after the keyword
+            start_pos = keyword_match.end()
+            context = text[start_pos:start_pos + 100]
+            # Look for number patterns
+            number_pattern = r'(?:Rs\.?|INR|₹)?\s*([\d,]+\.?\d*)\s*(?:crore|lakh|million|billion)?'
+            number_matches = re.finditer(number_pattern, context, re.IGNORECASE)
+            for num_match in number_matches:
+                value_str = num_match.group(1).replace(',', '')
+                try:
+                    value = float(value_str)
+                    if value > 0 and value < 1e15:
+                        return value
+                except (ValueError, TypeError):
+                    continue
+    
+    return None
+
+
+def extract_broker_estimate_detail(text: str) -> Optional[Dict[str, Any]]:
+    """
+    Extract richer broker estimate details from text.
+    Looks for patterns like:
+    - "Target Price: INR 1,110 ... HOLD"
+    - "Target: Rs. 1,110 (ICICI Securities) BUY"
+    - "Price Target: ₹1,110 ... Rating: HOLD ... Horizon: 12M"
+    
+    Returns a dict with: value, estimate_type, currency, as_of_date, broker_name, rating, horizon
+    """
+    if not text:
+        return None
+    
+    # Pattern to find target price with surrounding context
+    # Look for "Target Price", "Target", "Price Target" followed by currency and number
+    target_price_patterns = [
+        r'(?:Target\s+Price|Price\s+Target|Target)[:\s]+(?:Rs\.?|INR|₹)?\s*([\d,]+\.?\d*)',
+        r'(?:Rs\.?|INR|₹)?\s*([\d,]+\.?\d*)\s*(?:Target|Target\s+Price)',
+    ]
+    
+    value = None
+    currency = None
+    rating = None
+    broker_name = None
+    horizon = None
+    as_of_date = None
+    
+    # First, try to find the target price value
+    for pattern in target_price_patterns:
+        matches = list(re.finditer(pattern, text, re.IGNORECASE | re.MULTILINE))
+        for match in matches:
+            value_str = match.group(1).replace(',', '')
+            try:
+                candidate_value = float(value_str)
+                if candidate_value > 0 and candidate_value < 1e15:
+                    value = candidate_value
+                    # Extract currency from the match
+                    match_text = match.group(0)
+                    if 'INR' in match_text.upper() or '₹' in match_text or 'Rs' in match_text.upper():
+                        currency = 'INR'
+                    break
+            except (ValueError, TypeError):
+                continue
+        if value:
+            break
+    
+    # If we found a value, look for additional context in nearby text
+    if value:
+        # Find the position where we found the target price
+        for pattern in target_price_patterns:
+            match = re.search(pattern, text, re.IGNORECASE | re.MULTILINE)
+            if match:
+                # Look in a 200-character window around the match
+                start = max(0, match.start() - 50)
+                end = min(len(text), match.end() + 150)
+                context = text[start:end]
+                
+                # Extract rating (HOLD, BUY, SELL, etc.)
+                rating_patterns = [
+                    r'\b(Rating|Rating:)\s*(HOLD|BUY|SELL|STRONG\s+BUY|STRONG\s+SELL|NEUTRAL|ACCUMULATE|REDUCE)\b',
+                    r'\b(HOLD|BUY|SELL|STRONG\s+BUY|STRONG\s+SELL|NEUTRAL|ACCUMULATE|REDUCE)\s*(?:Rating|\(Rating\))?\b',
+                ]
+                for rating_pattern in rating_patterns:
+                    rating_match = re.search(rating_pattern, context, re.IGNORECASE)
+                    if rating_match:
+                        rating = rating_match.group(2) if rating_match.lastindex >= 2 else rating_match.group(1)
+                        rating = rating.upper().strip()
+                        break
+                
+                # Extract broker name (common Indian brokers)
+                broker_patterns = [
+                    r'\b(ICICI\s+Securities?|HDFC\s+Securities?|Kotak\s+Securities?|Axis\s+Securities?|'
+                    r'Motilal\s+Oswal|Edelweiss|Jefferies|Goldman\s+Sachs|Morgan\s+Stanley|'
+                    r'Credit\s+Suisse|UBS|CLSA|Nomura|Macquarie|Citi|Bank\s+of\s+America)\b',
+                    r'\b([A-Z][a-z]+\s+Securities?)\b',
+                ]
+                for broker_pattern in broker_patterns:
+                    broker_match = re.search(broker_pattern, context, re.IGNORECASE)
+                    if broker_match:
+                        broker_name = broker_match.group(1).strip()
+                        break
+                
+                # Extract horizon (12M, 6M, etc.)
+                horizon_patterns = [
+                    r'\b(Horizon|Timeframe|Period)[:\s]+([^,\n]+?)(?:\.|,|\n|$)',
+                    r'\b(\d+\s*[Mm]onths?|\d+\s*[Yy]ears?|12M|6M|18M|24M)\b',
+                ]
+                for horizon_pattern in horizon_patterns:
+                    horizon_match = re.search(horizon_pattern, context, re.IGNORECASE)
+                    if horizon_match:
+                        horizon = horizon_match.group(2) if horizon_match.lastindex >= 2 else horizon_match.group(1)
+                        horizon = horizon.strip()
+                        break
+                
+                # Extract date near the target price
+                date_pattern = r'\b(\d{4}-\d{2}-\d{2}|\d{1,2}[-/]\d{1,2}[-/]\d{4})\b'
+                date_match = re.search(date_pattern, context)
+                if date_match:
+                    date_str = date_match.group(1)
+                    # Try to normalize to YYYY-MM-DD
+                    try:
+                        if '-' in date_str and len(date_str.split('-')) == 3:
+                            parts = date_str.split('-')
+                            if len(parts[0]) == 4:  # YYYY-MM-DD
+                                as_of_date = date_str
+                            else:  # DD-MM-YYYY
+                                d, m, y = parts
+                                as_of_date = f"{y}-{m}-{d}"
+                        elif '/' in date_str:
+                            parts = date_str.split('/')
+                            if len(parts) == 3:
+                                if len(parts[2]) == 4:  # DD/MM/YYYY or MM/DD/YYYY
+                                    # Try DD/MM/YYYY first (common in India)
+                                    d, m, y = parts
+                                    as_of_date = f"{y}-{m.zfill(2)}-{d.zfill(2)}"
+                    except Exception:
+                        pass
+                
+                break
+    
+    # If we found a value, return the detail structure
+    if value:
+        detail = {
+            "value": value,
+            "estimate_type": "target_price",
+            "currency": currency or "INR",  # Default to INR for Indian context
+        }
+        if as_of_date:
+            detail["as_of_date"] = as_of_date
+        if broker_name:
+            detail["broker_name"] = broker_name
+        if rating:
+            detail["rating"] = rating
+        if horizon:
+            detail["horizon"] = horizon
+        
+        return detail
+    
+    return None
+
+
 def apply_fallback_extractors(text: str, source_url: Optional[str] = None) -> Dict[str, Any]:
     """
     Apply all fallback extractors to text and return structured metadata.
@@ -205,6 +417,16 @@ def apply_fallback_extractors(text: str, source_url: Optional[str] = None) -> Di
     Returns:
         Dictionary with extracted metadata fields
     """
+    # Extract broker estimate detail (richer structure)
+    broker_estimate_detail = extract_broker_estimate_detail(text)
+    
+    # Extract broker_estimate value (numeric) - prefer from detail, fallback to simple extractor
+    broker_estimate_value = None
+    if broker_estimate_detail and isinstance(broker_estimate_detail, dict):
+        broker_estimate_value = broker_estimate_detail.get("value")
+    else:
+        broker_estimate_value = extract_broker_estimate(text)
+    
     result: Dict[str, Any] = {
         'ticker': extract_ticker(text),
         'company_name': extract_company_name(text),
@@ -213,6 +435,8 @@ def apply_fallback_extractors(text: str, source_url: Optional[str] = None) -> Di
         'document_type': extract_document_type(text),
         'raw_dates_found': extract_dates(text),
         'detected_tickers': extract_detected_tickers(text),
+        'broker_estimate': broker_estimate_value,
+        'broker_estimate_detail': broker_estimate_detail,
         'tables': [],
         'kv_pairs': [],
         'headings': [],

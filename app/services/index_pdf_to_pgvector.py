@@ -28,7 +28,7 @@ DB_PASSWORD = os.getenv("DB_PASSWORD", "123456")
 DB_HOST = os.getenv("DB_HOST", "localhost")
 DB_PORT = int(os.getenv("DB_PORT", "5432"))
 
-OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
+OLLAMA_URL = os.getenv("OLLAMA_BASE_URL")
 OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY", None)  # optional
 OLLAMA_MODEL = os.getenv("EMBEDDING_MODEL", "nomic-embed-text:latest")
 

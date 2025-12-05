@@ -161,6 +161,25 @@ async def _extract_with_llm(file_path: str, instruction: str, source_url: Option
         llm_structured['_fallback_used'] = True
     else:
         llm_structured['_fallback_used'] = False
+    
+    # Ensure consistent structure: both broker_estimate and broker_estimate_detail should be present
+    # If LLM returned broker_estimate_detail but not broker_estimate, extract value from detail
+    if llm_structured:
+        broker_estimate_detail = llm_structured.get("broker_estimate_detail")
+        broker_estimate = llm_structured.get("broker_estimate")
+        
+        # If we have detail but no top-level estimate, extract value from detail
+        if broker_estimate_detail and isinstance(broker_estimate_detail, dict) and broker_estimate is None:
+            llm_structured["broker_estimate"] = broker_estimate_detail.get("value")
+        
+        # If we have top-level estimate but no detail, create minimal detail structure
+        if broker_estimate is not None and not broker_estimate_detail:
+            llm_structured["broker_estimate_detail"] = {"value": broker_estimate}
+        
+        # Ensure detail has value if it exists
+        if broker_estimate_detail and isinstance(broker_estimate_detail, dict):
+            if "value" not in broker_estimate_detail and broker_estimate is not None:
+                broker_estimate_detail["value"] = broker_estimate
 
     return {
         "extraction": extraction,
@@ -200,6 +219,17 @@ def process_pdf_from_file(
             "- language: string or null (e.g., 'en')\n"
             "- ocr_confidence: number or null between 0 and 1 (estimate if needed)\n"
             "- ingestion_method: string or null (e.g., 'pdf', 'web_scrape')\n"
+            "- broker_estimate: number or null (broker's equity target price per share if mentioned in the document)\n"
+            "- broker_estimate_detail: object or null with fields:\n"
+            "  * value: number (same as broker_estimate - the equity target price per share)\n"
+            "  * estimate_type: string (e.g., 'target_price')\n"
+            "  * currency: string (e.g., 'INR')\n"
+            "  * as_of_date: string in 'YYYY-MM-DD' format or null\n"
+            "  * broker_name: string (e.g., 'ICICI Securities') or null\n"
+            "  * rating: string (e.g., 'HOLD', 'BUY', 'SELL') or null\n"
+            "  * horizon: string (e.g., '12M (I-Sec rating framework)') or null\n"
+            "  Example: If document contains 'Target Price: INR 1,110 ... HOLD', return:\n"
+            "  {\"broker_estimate\": 1110.0, \"broker_estimate_detail\": {\"value\": 1110.0, \"estimate_type\": \"target_price\", \"currency\": \"INR\", \"rating\": \"HOLD\"}}\n"
             "- tables: array of objects, each with fields like "
             "{'page': int, 'title': string|null, 'summary': string, 'headers': [...]} \n"
             "- kv_pairs: array or object capturing key metrics, for example "
@@ -296,6 +326,70 @@ def process_pdf_from_file(
         except (TypeError, ValueError):
             pass
 
+        # Extract broker_estimate_detail and broker_estimate from LLM structured data
+        # Both should be present in llm_structured (from LLM or fallback)
+        broker_estimate_detail = llm_structured.get("broker_estimate_detail")
+        broker_est = llm_structured.get("broker_estimate")
+        
+        # Ensure broker_estimate_detail is a dict if we have any broker estimate data
+        if not broker_estimate_detail and broker_est is not None:
+            broker_estimate_detail = {"value": broker_est}
+        elif broker_estimate_detail and not isinstance(broker_estimate_detail, dict):
+            # If it's not a dict, create one with the value
+            broker_estimate_detail = {"value": broker_est} if broker_est is not None else None
+        
+        # Prefer value from broker_estimate_detail if available, otherwise use broker_estimate
+        broker_est_value = None
+        if broker_estimate_detail and isinstance(broker_estimate_detail, dict):
+            broker_est_value = broker_estimate_detail.get("value")
+        elif broker_est is not None:
+            broker_est_value = broker_est
+        
+        # Set the numeric value in the DB column
+        if broker_est_value is not None:
+            try:
+                doc.broker_estimate = float(broker_est_value)
+                # Ensure broker_estimate_detail has the value
+                if broker_estimate_detail:
+                    broker_estimate_detail["value"] = doc.broker_estimate
+                else:
+                    broker_estimate_detail = {"value": doc.broker_estimate}
+            except (TypeError, ValueError):
+                doc.broker_estimate = None
+                broker_estimate_detail = None
+        
+        # Fill missing fields in broker_estimate_detail using available info
+        if broker_estimate_detail and isinstance(broker_estimate_detail, dict):
+            # Fill missing as_of_date from report_date if available
+            if not broker_estimate_detail.get("as_of_date") and doc.report_date:
+                broker_estimate_detail["as_of_date"] = doc.report_date.strftime("%Y-%m-%d")
+            
+            # Fill missing currency (default to INR for Indian context)
+            if not broker_estimate_detail.get("currency"):
+                broker_estimate_detail["currency"] = "INR"
+            
+            # Fill missing estimate_type (default to target_price)
+            if not broker_estimate_detail.get("estimate_type"):
+                broker_estimate_detail["estimate_type"] = "target_price"
+            
+            # Try to infer broker_name from source_domain if missing
+            if not broker_estimate_detail.get("broker_name") and doc.source_domain:
+                # Map common domains to broker names
+                domain_to_broker = {
+                    "icicidirect.com": "ICICI Securities",
+                    "icicisecurities.com": "ICICI Securities",
+                    "hdfcsec.com": "HDFC Securities",
+                    "kotaksecurities.com": "Kotak Securities",
+                    "axisdirect.com": "Axis Securities",
+                    "motilaloswal.com": "Motilal Oswal",
+                    "edelweiss.in": "Edelweiss",
+                }
+                domain_lower = doc.source_domain.lower()
+                for domain, broker in domain_to_broker.items():
+                    if domain in domain_lower:
+                        broker_estimate_detail["broker_name"] = broker
+                        break
+
         # ingestion_method / source_domain may already be set from meta/source_url
         if llm_structured.get("ingestion_method"):
             doc.ingestion_method = llm_structured.get("ingestion_method")
@@ -325,7 +419,10 @@ def process_pdf_from_file(
                 "language": doc.language,
                 "ocr_confidence": doc.ocr_confidence,
                 "ingestion_method": doc.ingestion_method,
+                "broker_estimate": doc.broker_estimate,
             },
+            # Store richer broker estimate details
+            "broker_estimate_detail": broker_estimate_detail,
         }
         doc.is_processed = True
         doc.processing_status = "completed"
