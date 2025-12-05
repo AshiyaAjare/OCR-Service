@@ -74,6 +74,7 @@ class ExtractedDocumentModel(PrefixedBase):
     # New top-level metadata columns (nullable, some indexed for querying)
     ticker = Column(String(100), nullable=True, index=True)  # e.g., STEELCAS
     company_name = Column(String(500), nullable=True, index=True)
+    broker_name = Column(String(500), nullable=True, index=True)  # e.g., ICICI Securities
     report_date = Column(Date, nullable=True)  # YYYY-MM-DD
     period = Column(String(100), nullable=True)  # e.g., Q2 2025, H1 2025
     document_type = Column(String(100), nullable=True, index=True)  # results, press_release, etc.

@@ -270,7 +270,7 @@ def call_ollama_embeddings(texts: List[str], model: str = OLLAMA_MODEL, base_url
             # try fallback path /api/embeddings
             alt_endpoint = f"{base_url.rstrip('/')}/api/embeddings"
             logger.warning(f"Got status {resp.status_code} from {endpoint}, trying {alt_endpoint}")
-            resp = requests.post(alt_endpoint, headers=headers, json=payload, timeout=60)
+            resp = requests.post(alt_endpoint, headers=headers, json=payload, timeout=6000)
 
         resp.raise_for_status()
         j = resp.json()

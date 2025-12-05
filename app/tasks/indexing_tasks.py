@@ -9,7 +9,7 @@ from app.services.index_pdf_to_pgvector import index_merged_text
 
 logger = logging.getLogger(__name__)
 
-@celery.task(bind=True, max_retries=3, acks_late=True, soft_time_limit=600)
+@celery.task(bind=True, max_retries=3, acks_late=True, soft_time_limit=6000)
 def index_document_task(self, document_id: int):
     """
     Worker task to index merged_text for document_id into pgvector.

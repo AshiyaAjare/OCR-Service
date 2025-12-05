@@ -36,30 +36,187 @@ def extract_ticker(text: str) -> Optional[str]:
     
     return None
 
-
-def extract_company_name(text: str) -> Optional[str]:
+def extract_subject_company_name(text: str) -> Optional[str]:
     """
-    Extract company name from text.
-    Looks for patterns like "Company Name Ltd", "Company Name Limited", etc.
+    Try to extract the *subject* company name from an equity research report.
+
+    Heuristics:
+    1. Look near the header line containing things like:
+       "Equity Research", "Company Update", "Results Review", etc.
+       Typically the company name is on one of the next lines, followed by a sector line
+       like "Metals & Mining", "Banks", "IT Services", etc.
+
+    2. If that fails, look above the "Market Data" block – the company name is usually
+       5–10 lines before that, as a short title-case phrase.
     """
     if not text:
         return None
-    
-    # Pattern for company names ending with Ltd/Limited/Inc/etc
+
+    # Limit to first ~2–3k chars so we stay on page 1 (where the header lives)
+    header_text = text[:3000]
+    lines = [ln.strip() for ln in header_text.split("\n")]
+
+    # Common header markers in research reports
+    research_header_patterns = [
+        r"Equity\s+Research",
+        r"Company\s+Update",
+        r"Results\s+Review",
+        r"Initiating\s+Coverage",
+        r"Investment\s+Research",
+    ]
+
+    sector_keywords = (
+        r"\b("
+        r"Metals|Mining|Banks|Banking|IT|Technology|Tech|Services|Software|Pharma|Healthcare|Health\s*Care|"
+        r"Auto|Automotive|FMCG|Consumer|Energy|Oil|Gas|Power|Infrastructure|Infra|Real\s+Estate|Cement|"
+        r"Telecom|Media|Retail|Chemicals|Industrial|Industrials"
+        r")\b"
+    )
+
+    def _looks_like_company_name(candidate: str) -> bool:
+        """Basic shape + filters so we don't pick broker names, dates, or junk."""
+        if not candidate:
+            return False
+
+        # Reject very short or very long
+        if len(candidate) < 2 or len(candidate) > 60:
+            return False
+
+        # Reject lines with obvious non-name noise
+        if any(sym in candidate for sym in ["@", "|", "www.", "http", "mailto:", "Target Price", "CMP:"]):
+            return False
+
+        # Word-count heuristic
+        words = candidate.split()
+        if not (1 <= len(words) <= 5):
+            return False
+
+        # Not purely numeric / date-like
+        if re.search(r"^\d{1,2}[-/]\d{1,2}[-/]\d{2,4}$", candidate):
+            return False
+
+        # Avoid brokers / generic financial entities
+        if re.search(r"\b(Securities|Wealth|Capital|Markets|Financial|Services)\b", candidate, re.IGNORECASE):
+            return False
+
+        # Shape: title-case or all caps is usually fine for a name like "JSW Steel"
+        if candidate.isupper():
+            # Avoid single all-caps words like "HOLD", "BUY"
+            if len(words) == 1 and len(words[0]) <= 4:
+                return False
+            return True
+
+        # First char upper; not all lower-case
+        if candidate[0].isupper() and not candidate.islower():
+            return True
+
+        return False
+
+    # --- 1) Look after research header line: "India | Equity Research | Company Update" ---
+    for i, line in enumerate(lines):
+        line_lower = line.lower()
+        if any(re.search(pat, line_lower, re.IGNORECASE) for pat in research_header_patterns):
+            # Look at the next few non-empty lines for a plausible company name
+            for j in range(i + 1, min(i + 7, len(lines))):
+                candidate = lines[j].strip()
+                if not candidate:
+                    continue
+
+                # Skip obvious heading labels
+                if re.search(r"^(rating|target|price|date|sector|industry|market\s+data)\b",
+                             candidate, re.IGNORECASE):
+                    continue
+
+                if not _looks_like_company_name(candidate):
+                    continue
+
+                # Bonus: if the next line looks like a sector line, that boosts confidence
+                if j + 1 < len(lines):
+                    next_line = lines[j + 1].strip()
+                    if re.search(sector_keywords, next_line, re.IGNORECASE):
+                        return candidate
+
+                # Even without sector confirmation, if it looks like a solid company name, accept it
+                return candidate
+
+    # --- 2) Fallback: look above "Market Data" anchor ---
+    market_match = re.search(r"Market\s+Data", header_text, re.IGNORECASE)
+    if market_match:
+        start_pos = market_match.start()
+        before_text = header_text[max(0, start_pos - 600):start_pos]
+        before_lines = [ln.strip() for ln in before_text.split("\n") if ln.strip()]
+
+        # Scan the last ~10 lines before "Market Data" for a name-like line
+        for line in reversed(before_lines[-10:]):
+            if _looks_like_company_name(line):
+                return line
+
+    return None
+
+
+def extract_company_name(text: str) -> Optional[str]:
+    """
+    Extract subject company name from the document.
+
+    Priority:
+    1. Use layout-based subject-company heuristic (Equity Research / Company Update header, Market Data block).
+    2. Fall back to generic '... Ltd/Limited/Inc' style patterns.
+    3. Avoid returning obvious broker names like 'ICICI Securities Limited' unless nothing else is found.
+    """
+    if not text:
+        return None
+
+    # --- 1) Prefer a subject-company style extraction (header-based) ---
+    # This uses the function you already have defined below in this file.
+    try:
+        subject_candidate = extract_subject_company_name(text)
+    except NameError:
+        # If for some reason it's not defined yet, just ignore and continue.
+        subject_candidate = None
+
+    if subject_candidate:
+        return subject_candidate  # e.g. "JSW Steel"
+
+    # --- 2) Fallback: generic pattern for legal-entity-style names ---
     patterns = [
+        # Names ending with Ltd / Limited / Inc / etc.
         r'\b([A-Z][A-Za-z\s&]{3,50}?\s+(?:Ltd|Limited|Inc|Incorporated|Corporation|Corp|Private|Pvt|Public|Ltd\.))\b',
+        # Names ending with common business words but without suffix
         r'\b([A-Z][A-Za-z\s&]{3,50}?\s+(?:Engineering|Technologies|Solutions|Industries|Group|Holdings))\b',
     ]
-    
+
+    generic_candidates: list[str] = []
+
+    for pattern in patterns:
+        for match in re.finditer(pattern, text):
+            company = match.group(1).strip()
+            if not (5 <= len(company) <= 100):
+                continue
+
+            # Heuristic: skip obvious broker-style names here (Securities + Limited)
+            # Example: "ICICI Securities Limited"
+            if re.search(r'\bSecurities\b', company) and re.search(r'\b(Ltd|Limited)\b', company):
+                continue
+
+            generic_candidates.append(company)
+
+        if generic_candidates:
+            break
+
+    if generic_candidates:
+        # Return the first reasonable candidate we found
+        return generic_candidates[0]
+
+    # --- 3) As a last resort, allow a broker-like match if absolutely nothing else exists ---
     for pattern in patterns:
         match = re.search(pattern, text)
         if match:
             company = match.group(1).strip()
-            # Filter out very short or common words
-            if len(company) >= 5 and len(company) <= 100:
+            if 5 <= len(company) <= 100:
                 return company
-    
+
     return None
+
 
 
 def extract_dates(text: str) -> List[Dict[str, Optional[str]]]:
