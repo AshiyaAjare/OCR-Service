@@ -422,6 +422,67 @@ def extract_broker_estimate(text: str) -> Optional[float]:
     return None
 
 
+def extract_broker_name_from_text(text: str) -> Optional[str]:
+    """
+    Extract broker name from document text by looking for research report headers/footers.
+    Looks for patterns like:
+    - "Avendus Spark Research"
+    - "ICICI Securities Research"
+    - "Equity Research" headers with broker names nearby
+    """
+    if not text:
+        return None
+    
+    # Limit search to first ~5000 chars (header area) and last ~3000 chars (footer area)
+    header_text = text[:5000]
+    footer_text = text[-3000:] if len(text) > 3000 else text
+    
+    # Common broker patterns (expanded list)
+    broker_patterns = [
+        r'\b(Avendus\s+Spark(?:\s+Research)?)\b',
+        r'\b(ICICI\s+Securities?(?:\s+Research)?)\b',
+        r'\b(HDFC\s+Securities?(?:\s+Research)?)\b',
+        r'\b(Kotak\s+Securities?(?:\s+Research)?)\b',
+        r'\b(Axis\s+Securities?(?:\s+Research)?)\b',
+        r'\b(Motilal\s+Oswal(?:\s+Research)?)\b',
+        r'\b(Edelweiss(?:\s+Research)?)\b',
+        r'\b(Jefferies(?:\s+Research)?)\b',
+        r'\b(Goldman\s+Sachs(?:\s+Research)?)\b',
+        r'\b(Morgan\s+Stanley(?:\s+Research)?)\b',
+        r'\b(Credit\s+Suisse(?:\s+Research)?)\b',
+        r'\b(UBS(?:\s+Research)?)\b',
+        r'\b(CLSA(?:\s+Research)?)\b',
+        r'\b(Nomura(?:\s+Research)?)\b',
+        r'\b(Macquarie(?:\s+Research)?)\b',
+        r'\b(Citi(?:\s+Research)?)\b',
+        r'\b(Bank\s+of\s+America(?:\s+Research)?)\b',
+        # Generic pattern for "[Name] Research" or "[Name] Securities"
+        r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?\s+(?:Research|Securities?))\b',
+    ]
+    
+    # Search in header first (more likely to have broker name)
+    for pattern in broker_patterns:
+        match = re.search(pattern, header_text, re.IGNORECASE)
+        if match:
+            broker_name = match.group(1).strip()
+            # Filter out common false positives
+            if broker_name and len(broker_name) > 3:
+                # Skip if it looks like a company name, not a broker
+                if not re.search(r'\b(Ltd|Limited|Inc|Corporation|Corp)\b', broker_name, re.IGNORECASE):
+                    return broker_name
+    
+    # Search in footer as fallback
+    for pattern in broker_patterns:
+        match = re.search(pattern, footer_text, re.IGNORECASE)
+        if match:
+            broker_name = match.group(1).strip()
+            if broker_name and len(broker_name) > 3:
+                if not re.search(r'\b(Ltd|Limited|Inc|Corporation|Corp)\b', broker_name, re.IGNORECASE):
+                    return broker_name
+    
+    return None
+
+
 def extract_broker_estimate_detail(text: str) -> Optional[Dict[str, Any]]:
     """
     Extract richer broker estimate details from text.
@@ -437,9 +498,20 @@ def extract_broker_estimate_detail(text: str) -> Optional[Dict[str, Any]]:
     
     # Pattern to find target price with surrounding context
     # Look for "Target Price", "Target", "Price Target" followed by currency and number
+    # Prioritize patterns that explicitly mention "Target Price" to avoid matching CMP
     target_price_patterns = [
-        r'(?:Target\s+Price|Price\s+Target|Target)[:\s]+(?:Rs\.?|INR|₹)?\s*([\d,]+\.?\d*)',
-        r'(?:Rs\.?|INR|₹)?\s*([\d,]+\.?\d*)\s*(?:Target|Target\s+Price)',
+        # Pattern 1: Table format - "CMP Target Price Rating" header, then "Rs. 1,087 Rs. 1,042 REDUCE"
+        # Find "Target Price" in header, then get the second number in the next line
+        r'\b(?:CMP|Current\s+Market\s+Price)\s+Target\s+Price[^\n]*\n[^\n]*(?:Rs\.?|INR|₹)?\s*[\d,]+\s+(?:Rs\.?|INR|₹)?\s*([\d,]+\.?\d*)',
+        # Pattern 2: "Target Price: Rs. 1,042" or "Target Price Rs. 1,042" (same line)
+        r'(?:Target\s+Price|Price\s+Target|TP)[:\s]+(?:Rs\.?|INR|₹)?\s*([\d,]+\.?\d*)',
+        # Pattern 3: Multi-line - "Target Price" on one line, number on next line
+        # Look for "Target Price" followed by newline and then number
+        r'(?:Target\s+Price|Price\s+Target|TP)[:\s]*\n\s*(?:Rs\.?|INR|₹)?\s*([\d,]+\.?\d*)',
+        # Pattern 4: "Rs. 1,042 Target Price" or "Rs. 1,042 Target"
+        r'(?:Rs\.?|INR|₹)?\s*([\d,]+\.?\d*)\s*(?:Target\s+Price|Price\s+Target|Target|TP)\b',
+        # Pattern 5: "Target: Rs. 1,042" (less specific, use as fallback)
+        r'(?:Target)[:\s]+(?:Rs\.?|INR|₹)?\s*([\d,]+\.?\d*)',
     ]
     
     value = None
@@ -450,6 +522,7 @@ def extract_broker_estimate_detail(text: str) -> Optional[Dict[str, Any]]:
     as_of_date = None
     
     # First, try to find the target price value
+    # Use the most specific patterns first to avoid matching CMP
     for pattern in target_price_patterns:
         matches = list(re.finditer(pattern, text, re.IGNORECASE | re.MULTILINE))
         for match in matches:
@@ -457,6 +530,17 @@ def extract_broker_estimate_detail(text: str) -> Optional[Dict[str, Any]]:
             try:
                 candidate_value = float(value_str)
                 if candidate_value > 0 and candidate_value < 1e15:
+                    # Additional check: if pattern contains "CMP" nearby, skip it
+                    match_start = max(0, match.start() - 20)
+                    match_end = min(len(text), match.end() + 20)
+                    context = text[match_start:match_end]
+                    # Skip if "CMP" appears before the target price in the same context
+                    if re.search(r'\bCMP\b', context[:match.start() - match_start], re.IGNORECASE):
+                        # Check if there's a number after CMP that might be the CMP value
+                        cmp_match = re.search(r'\bCMP[:\s]+(?:Rs\.?|INR|₹)?\s*([\d,]+\.?\d*)', context, re.IGNORECASE)
+                        if cmp_match and abs(float(cmp_match.group(1).replace(',', '')) - candidate_value) < 10:
+                            # This might be CMP, not target price, skip it
+                            continue
                     value = candidate_value
                     # Extract currency from the match
                     match_text = match.group(0)
@@ -491,9 +575,9 @@ def extract_broker_estimate_detail(text: str) -> Optional[Dict[str, Any]]:
                         rating = rating.upper().strip()
                         break
                 
-                # Extract broker name (common Indian brokers)
+                # Extract broker name (common Indian and international brokers)
                 broker_patterns = [
-                    r'\b(ICICI\s+Securities?|HDFC\s+Securities?|Kotak\s+Securities?|Axis\s+Securities?|'
+                    r'\b(Avendus\s+Spark(?:\s+Research)?|ICICI\s+Securities?|HDFC\s+Securities?|Kotak\s+Securities?|Axis\s+Securities?|'
                     r'Motilal\s+Oswal|Edelweiss|Jefferies|Goldman\s+Sachs|Morgan\s+Stanley|'
                     r'Credit\s+Suisse|UBS|CLSA|Nomura|Macquarie|Citi|Bank\s+of\s+America)\b',
                     r'\b([A-Z][a-z]+\s+Securities?)\b',
@@ -553,6 +637,11 @@ def extract_broker_estimate_detail(text: str) -> Optional[Dict[str, Any]]:
             detail["as_of_date"] = as_of_date
         if broker_name:
             detail["broker_name"] = broker_name
+        # If broker_name not found in context, try broader extraction from document
+        elif not broker_name:
+            broker_name = extract_broker_name_from_text(text)
+            if broker_name:
+                detail["broker_name"] = broker_name
         if rating:
             detail["rating"] = rating
         if horizon:

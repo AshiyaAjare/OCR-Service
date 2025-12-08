@@ -383,12 +383,24 @@ def process_pdf_from_file(
                     "axisdirect.com": "Axis Securities",
                     "motilaloswal.com": "Motilal Oswal",
                     "edelweiss.in": "Edelweiss",
+                    "avendusspark.com": "Avendus Spark",
                 }
                 domain_lower = doc.source_domain.lower()
                 for domain, broker in domain_to_broker.items():
                     if domain in domain_lower:
                         broker_estimate_detail["broker_name"] = broker
                         break
+            
+            # If still missing, try to extract from document text
+            if not broker_estimate_detail.get("broker_name") and extraction.merged_text:
+                from app.services.fallback_extractors import extract_broker_name_from_text
+                extracted_broker = extract_broker_name_from_text(extraction.merged_text)
+                if extracted_broker:
+                    broker_estimate_detail["broker_name"] = extracted_broker
+            
+            # Save broker_name to database column if available
+            if broker_estimate_detail.get("broker_name"):
+                doc.broker_name = broker_estimate_detail.get("broker_name")
 
         # ingestion_method / source_domain may already be set from meta/source_url
         if llm_structured.get("ingestion_method"):
@@ -420,6 +432,7 @@ def process_pdf_from_file(
                 "ocr_confidence": doc.ocr_confidence,
                 "ingestion_method": doc.ingestion_method,
                 "broker_estimate": doc.broker_estimate,
+                "broker_name": doc.broker_name,
             },
             # Store richer broker estimate details
             "broker_estimate_detail": broker_estimate_detail,

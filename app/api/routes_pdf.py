@@ -99,6 +99,8 @@ def get_extracted_document_status(
         "language": doc.language,
         "ocr_confidence": doc.ocr_confidence,
         "ingestion_method": doc.ingestion_method,
+        "broker_name": doc.broker_name,
+        "broker_estimate": doc.broker_estimate,
     }
 
     if doc.is_processed and doc.processing_status == "completed":
@@ -223,6 +225,7 @@ async def extract_with_llm(
                 "headings": extraction_metadata.get("headings", []),
                 "detected_tickers": extraction_metadata.get("detected_tickers", []),
                 "raw_dates_found": extraction_metadata.get("raw_dates_found", []),
+                "broker_estimate_detail": extraction_metadata.get("broker_estimate_detail"),
             },
         }
         
