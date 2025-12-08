@@ -121,7 +121,11 @@ async def extract_with_llm(
         default=(
             "You are analyzing a financial or regulatory PDF. "
             "Return a single JSON object with these top-level keys:\n"
-            "- ticker, company_name, report_date (YYYY-MM-DD), period, document_type,\n"
+             "- company_name: string or null (the PRIMARY/SUBJECT company this report is about, "
+            "NOT competitors or mentioned companies. Look for the company name in document titles, "
+            "headers, ticker symbols, and the main subject of the analysis. Examples: 'Asian Paints', "
+            "'JSW Steel', 'Steelcase Inc'. Avoid picking competitor names mentioned in passing.)\n"
+            "- , report_date (YYYY-MM-DD), period, document_type,\n"
             "- source_domain, language, ocr_confidence (0..1), ingestion_method,\n"
             "- broker_estimate: number or null (broker's equity target price per share if mentioned),\n"
             "- broker_estimate_detail: object or null with fields:\n"

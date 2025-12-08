@@ -37,6 +37,26 @@ target_metadata = Base.metadata
 # ... etc.
 
 
+def include_object(object, name, type_, reflected, compare_to):
+    """
+    Exclude Django-managed tables from Alembic autogenerate.
+    
+    Only include tables that have our table prefix (ocr_ by default).
+    This prevents Alembic from trying to create migrations for Django-managed
+    tables like usermanagement_company and usermanagement_companylisting.
+    """
+    if type_ == "table":
+        # Only include tables with our prefix
+        # Django-managed tables don't have the prefix, so they'll be excluded
+        table_prefix = settings.DATABASE_TABLE_PREFIX
+        if name.startswith(table_prefix):
+            return True
+        # Exclude Django-managed tables
+        return False
+    # Include all other objects (columns, indexes, etc.) for our tables
+    return True
+
+
 def run_migrations_offline() -> None:
     """Run migrations in 'offline' mode.
 
@@ -55,6 +75,7 @@ def run_migrations_offline() -> None:
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
+        include_object=include_object,
     )
 
     with context.begin_transaction():
@@ -76,7 +97,9 @@ def run_migrations_online() -> None:
 
     with connectable.connect() as connection:
         context.configure(
-            connection=connection, target_metadata=target_metadata
+            connection=connection,
+            target_metadata=target_metadata,
+            include_object=include_object,
         )
 
         with context.begin_transaction():

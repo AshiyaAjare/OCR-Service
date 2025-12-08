@@ -1,6 +1,6 @@
 # app/models/db_models.py
 
-from sqlalchemy import Column, Integer, String, Text, DateTime, Boolean, JSON
+from sqlalchemy import Column, Integer, String, Text, DateTime, Boolean, JSON, Numeric
 from sqlalchemy.sql import func, text
 from app.database import Base
 from app.config import settings
@@ -111,4 +111,58 @@ class ExtractedDocumentModel(PrefixedBase):
     
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+
+
+# Models for Django-managed tables (read-only access)
+# These tables are managed by Django, so we only define them for querying purposes
+class CompanyModel(Base):
+    """
+    Database model for usermanagement_company table (Django-managed).
+    This is a read-only model for querying existing Django tables.
+    """
+    __tablename__ = "usermanagement_company"
+    __table_args__ = {'extend_existing': True}  # Allow redefinition if needed
+
+    company_id = Column(Integer, primary_key=True, name="company_id")
+    company_name = Column(String(100), nullable=False)
+    isin = Column(String(100), nullable=True)
+    nse = Column(String(100), nullable=True)
+    bse = Column(String(100), nullable=True)
+    bloomberg = Column(String(100), nullable=True)
+    bse_500 = Column(String(100), nullable=True)
+    nifty_50 = Column(String(100), nullable=True)
+    reuters = Column(String(100), nullable=True)
+    cin = Column(String(100), nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False)
+    updated_at = Column(DateTime(timezone=True), nullable=False)
+    deleted = Column(Boolean, nullable=False)
+
+
+class CompanyListingModel(Base):
+    """
+    Database model for usermanagement_companylisting table (Django-managed).
+    This is a read-only model for querying existing Django tables.
+    """
+    __tablename__ = "usermanagement_companylisting"
+    __table_args__ = {'extend_existing': True}  # Allow redefinition if needed
+
+    id = Column(Integer, primary_key=True)
+    company_id = Column(Integer, nullable=False)  # FK to usermanagement_company.company_id (Django-managed)
+    fv_cmp = Column(Numeric(precision=19, scale=5), nullable=True)  # House value (our own valuation)
+    cmp = Column(Numeric(precision=19, scale=5), nullable=True)
+    percent_change = Column(Numeric(precision=19, scale=5), nullable=True)
+    fortress_fv = Column(Numeric(precision=19, scale=5), nullable=True)
+    fv_broker = Column(Numeric(precision=19, scale=5), nullable=True)
+    last_updated = Column(DateTime(timezone=True), nullable=True)
+    percent_change_last15day = Column(Numeric(precision=19, scale=5), nullable=True)
+    percent_change_last30day = Column(Numeric(precision=19, scale=5), nullable=True)
+    percent_change_last3day = Column(Numeric(precision=19, scale=5), nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False)
+    deleted = Column(Boolean, nullable=False)
+    updated_at = Column(DateTime(timezone=True), nullable=False)
+    fifty_two_week_high_low = Column(String(100), nullable=True)
+    relevant_average = Column(Numeric(precision=19, scale=5), nullable=True)
+    relevant_quarter = Column(String(100), nullable=True)
+    dynamic_return = Column(Numeric(precision=19, scale=2), nullable=True)
+    fytd_return = Column(Numeric(precision=19, scale=2), nullable=True)
 

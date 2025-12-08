@@ -41,19 +41,21 @@ def extract_subject_company_name(text: str) -> Optional[str]:
     Try to extract the *subject* company name from an equity research report.
 
     Heuristics:
-    1. Look near the header line containing things like:
-       "Equity Research", "Company Update", "Results Review", etc.
+    1. Look for company name in document title (e.g., "Asian Paints Outlook Review")
+    2. Look near the header line containing things like:
+       "Equity Research", "Company Update", "Results Review", "Outlook Review", etc.
        Typically the company name is on one of the next lines, followed by a sector line
        like "Metals & Mining", "Banks", "IT Services", etc.
 
-    2. If that fails, look above the "Market Data" block – the company name is usually
+    3. If that fails, look above the "Market Data" block – the company name is usually
        5–10 lines before that, as a short title-case phrase.
+    4. Look for company name in the first few lines (often in all caps like "ASIAN PAINTS")
     """
     if not text:
         return None
 
-    # Limit to first ~2–3k chars so we stay on page 1 (where the header lives)
-    header_text = text[:3000]
+    # Limit to first ~5k chars so we stay on page 1 (where the header lives)
+    header_text = text[:5000]
     lines = [ln.strip() for ln in header_text.split("\n")]
 
     # Common header markers in research reports
@@ -63,6 +65,7 @@ def extract_subject_company_name(text: str) -> Optional[str]:
         r"Results\s+Review",
         r"Initiating\s+Coverage",
         r"Investment\s+Research",
+        r"Outlook\s+Review",  # Added for cases like "Asian Paints Outlook Review"
     ]
 
     sector_keywords = (
@@ -82,6 +85,12 @@ def extract_subject_company_name(text: str) -> Optional[str]:
         if len(candidate) < 2 or len(candidate) > 60:
             return False
 
+        # Reject page markers like "[PAGE 1 PDF]" or "[PAGE 1 OCR]"
+        if re.search(r'^\[PAGE\s+\d+\s+(PDF|OCR)\]', candidate, re.IGNORECASE):
+            return False
+        if candidate.startswith('[') and 'PAGE' in candidate.upper():
+            return False
+
         # Reject lines with obvious non-name noise
         if any(sym in candidate for sym in ["@", "|", "www.", "http", "mailto:", "Target Price", "CMP:"]):
             return False
@@ -99,7 +108,7 @@ def extract_subject_company_name(text: str) -> Optional[str]:
         if re.search(r"\b(Securities|Wealth|Capital|Markets|Financial|Services)\b", candidate, re.IGNORECASE):
             return False
 
-        # Shape: title-case or all caps is usually fine for a name like "JSW Steel"
+        # Shape: title-case or all caps is usually fine for a name like "JSW Steel" or "ASIAN PAINTS"
         if candidate.isupper():
             # Avoid single all-caps words like "HOLD", "BUY"
             if len(words) == 1 and len(words[0]) <= 4:
@@ -111,6 +120,44 @@ def extract_subject_company_name(text: str) -> Optional[str]:
             return True
 
         return False
+
+    # --- 0) Look for company name in document title pattern: "Company Name Outlook Review" or "Company Name | Rating" ---
+    title_patterns = [
+        r'^([A-Z][A-Za-z\s&]{2,40}?)\s+(?:Outlook\s+Review|Results\s+Review|Company\s+Update|Equity\s+Research)',
+        r'^([A-Z][A-Za-z\s&]{2,40}?)\s*\|\s*(?:Rating|Outlook|Review)',
+        r'([A-Z][A-Za-z\s&]{2,40}?)\s+Outlook\s+Review\s+\d+QFY\d+',  # "Asian Paints Outlook Review 2QFY26"
+    ]
+    for pattern in title_patterns:
+        match = re.search(pattern, header_text, re.IGNORECASE | re.MULTILINE)
+        if match:
+            candidate = match.group(1).strip()
+            if _looks_like_company_name(candidate):
+                return candidate
+
+    # --- 0.5) Look for all-caps company name in first few lines (common pattern: "ASIAN PAINTS" on its own line) ---
+    for i, line in enumerate(lines[:15]):  # Check first 15 lines
+        # Skip page markers explicitly
+        if re.search(r'^\[PAGE\s+\d+\s+(PDF|OCR)\]', line, re.IGNORECASE):
+            continue
+        if line.startswith('[') and 'PAGE' in line.upper():
+            continue
+            
+        if line.isupper() and 5 <= len(line) <= 40 and not any(sym in line for sym in ["|", "@", "http"]):
+            words = line.split()
+            if 1 <= len(words) <= 4:
+                # Check if it's not a rating or common header word
+                if not re.search(r'\b(HOLD|BUY|SELL|REDUCE|ACCUMULATE|NEUTRAL|RATING|TARGET|PRICE|CMP|PAGE|PDF|OCR)\b', line, re.IGNORECASE):
+                    # Check if next line has context that suggests it's a company name
+                    if i + 1 < len(lines):
+                        next_line = lines[i + 1].strip()
+                        # Skip page markers in next line too
+                        if not re.search(r'^\[PAGE\s+\d+\s+(PDF|OCR)\]', next_line, re.IGNORECASE):
+                            if re.search(r'(Target\s+Price|Rating|Outlook|Review|CMP)', next_line, re.IGNORECASE):
+                                return line.title()  # Convert "ASIAN PAINTS" to "Asian Paints"
+                    # Also check if this line appears before "Target Price" or "Rating"
+                    remaining_text = '\n'.join(lines[i+1:min(i+5, len(lines))])
+                    if re.search(r'(Target\s+Price|Rating|CMP|Outlook)', remaining_text, re.IGNORECASE):
+                        return line.title()
 
     # --- 1) Look after research header line: "India | Equity Research | Company Update" ---
     for i, line in enumerate(lines):
@@ -160,24 +207,45 @@ def extract_company_name(text: str) -> Optional[str]:
 
     Priority:
     1. Use layout-based subject-company heuristic (Equity Research / Company Update header, Market Data block).
-    2. Fall back to generic '... Ltd/Limited/Inc' style patterns.
-    3. Avoid returning obvious broker names like 'ICICI Securities Limited' unless nothing else is found.
+    2. Look for company names in titles/headers (even without "Limited" suffix).
+    3. Fall back to generic '... Ltd/Limited/Inc' style patterns.
+    4. Avoid returning obvious broker names like 'ICICI Securities Limited' unless nothing else is found.
     """
     if not text:
         return None
 
     # --- 1) Prefer a subject-company style extraction (header-based) ---
-    # This uses the function you already have defined below in this file.
     try:
         subject_candidate = extract_subject_company_name(text)
     except NameError:
-        # If for some reason it's not defined yet, just ignore and continue.
         subject_candidate = None
 
     if subject_candidate:
-        return subject_candidate  # e.g. "JSW Steel"
+        return subject_candidate  # e.g. "JSW Steel" or "Asian Paints"
 
-    # --- 2) Fallback: generic pattern for legal-entity-style names ---
+    # --- 2) Look for company names in titles/headers without "Limited" suffix ---
+    # Pattern: "Company Name" appearing early in document, possibly in all caps
+    title_patterns = [
+        r'^([A-Z][A-Za-z\s&]{2,40}?)\s+(?:Outlook|Review|Results|Update)',  # "Asian Paints Outlook"
+        r'\b([A-Z]{2,20}\s+[A-Z]{2,20})\b',  # All caps two-word names like "ASIAN PAINTS"
+    ]
+    
+    # Check first 2000 chars for title patterns
+    header_section = text[:2000]
+    for pattern in title_patterns:
+        matches = list(re.finditer(pattern, header_section, re.MULTILINE))
+        for match in matches:
+            candidate = match.group(1).strip()
+            words = candidate.split()
+            # Must be 1-4 words, not too short/long
+            if 1 <= len(words) <= 4 and 3 <= len(candidate) <= 50:
+                # Skip if it contains broker-like words
+                if not re.search(r'\b(Securities|Research|Capital|Wealth)\b', candidate, re.IGNORECASE):
+                    # Skip if it's a rating word
+                    if not re.search(r'\b(HOLD|BUY|SELL|REDUCE|ACCUMULATE|NEUTRAL)\b', candidate, re.IGNORECASE):
+                        return candidate.title() if candidate.isupper() else candidate
+
+    # --- 3) Fallback: generic pattern for legal-entity-style names ---
     patterns = [
         # Names ending with Ltd / Limited / Inc / etc.
         r'\b([A-Z][A-Za-z\s&]{3,50}?\s+(?:Ltd|Limited|Inc|Incorporated|Corporation|Corp|Private|Pvt|Public|Ltd\.))\b',
@@ -198,6 +266,13 @@ def extract_company_name(text: str) -> Optional[str]:
             if re.search(r'\bSecurities\b', company) and re.search(r'\b(Ltd|Limited)\b', company):
                 continue
 
+            # Skip competitor names that appear in lists (like "JSW Paints & Akzo Nobel India Limited")
+            # by checking if they appear after certain keywords
+            match_start = match.start()
+            context_before = text[max(0, match_start - 100):match_start].lower()
+            if any(keyword in context_before for keyword in ['competitor', 'competition', 'combined', 'firepower', '&']):
+                continue
+
             generic_candidates.append(company)
 
         if generic_candidates:
@@ -207,7 +282,7 @@ def extract_company_name(text: str) -> Optional[str]:
         # Return the first reasonable candidate we found
         return generic_candidates[0]
 
-    # --- 3) As a last resort, allow a broker-like match if absolutely nothing else exists ---
+    # --- 4) As a last resort, allow a broker-like match if absolutely nothing else exists ---
     for pattern in patterns:
         match = re.search(pattern, text)
         if match:
