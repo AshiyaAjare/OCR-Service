@@ -110,21 +110,43 @@ def answer_question_with_rag(question: str, top_k: int = TOP_K, conn=None) -> Di
     """
     Steps:
      1) embed user question
-     2) retrieve k chunks from pgvector
-     3) build prompt
-     4) call LLM to produce answer
-     5) return answer + provenance
+     2) extract company/broker names from question (if present)
+     3) retrieve k chunks from pgvector (with metadata filtering if applicable)
+     4) build prompt
+     5) call LLM to produce answer
+     6) return answer + provenance
     """
     # 1) embed question (reuses your Ollama embedding function)
     q_embed = call_ollama_embeddings([question], model=EMBED_MODEL)[0]
 
-    # 2) retrieve chunks
-    chunks = retrieve_similar_chunks(q_embed, top_k=top_k, conn=conn)
+    # 2) Try to extract company/broker names from question
+    from app.services.rag.retreiver import extract_company_name_from_question
+    company_name = extract_company_name_from_question(question)
+    broker_name = None  # Could enhance to extract broker names too
+    
+    if company_name:
+        logger.info(f"Extracted company_name '{company_name}' from question: '{question}'")
+    else:
+        logger.info(f"No company_name extracted from question: '{question}'")
+    
+    # 3) retrieve chunks (with metadata filtering if company_name found)
+    chunks = retrieve_similar_chunks(
+        q_embed, 
+        top_k=top_k, 
+        conn=conn,
+        company_name=company_name,
+        broker_name=broker_name
+    )
+    
+    logger.info(f"Retrieved {len(chunks)} chunks for question")
+    if chunks:
+        doc_ids = set([c["document_id"] for c in chunks])
+        logger.info(f"Chunks retrieved from document IDs: {doc_ids}")
 
-    # 3) build prompt
+    # 4) build prompt
     prompt = build_prompt(question, chunks)
 
-    # 4) call LLM
+    # 5) call LLM
     llm_resp = call_ollama_mistral_sync(prompt, temperature=0.0, top_p=0.1, model=LLM_MODEL)
 
     # Parse LLM response into structured JSON + sources, if possible

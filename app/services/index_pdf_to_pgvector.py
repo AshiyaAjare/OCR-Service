@@ -21,12 +21,18 @@ import psycopg2
 from psycopg2.extras import Json
 from dateutil import parser as dateparser
 
+# Import settings to use same database config as SQLAlchemy
+from app.config import settings
+
 # ---------- CONFIG ----------
-DB_NAME = os.getenv("DB_NAME", "fortress_db")
-DB_USER = os.getenv("DB_USER", "ashiya")
-DB_PASSWORD = os.getenv("DB_PASSWORD", "123456")
-DB_HOST = os.getenv("DB_HOST", "localhost")
-DB_PORT = int(os.getenv("DB_PORT", "5432"))
+# Use same database settings as SQLAlchemy to ensure consistency
+# This ensures both SQLAlchemy and psycopg2 connect to the same database
+# Use settings with fallback to environment variables for backward compatibility
+DB_NAME = settings.DATABASE_NAME if hasattr(settings, 'DATABASE_NAME') and settings.DATABASE_NAME else os.getenv("DATABASE_NAME", "fortress2_db")
+DB_USER = settings.DATABASE_USER if hasattr(settings, 'DATABASE_USER') and settings.DATABASE_USER else os.getenv("DATABASE_USER", "ashiya")
+DB_PASSWORD = settings.DATABASE_PASSWORD if hasattr(settings, 'DATABASE_PASSWORD') and settings.DATABASE_PASSWORD else os.getenv("DATABASE_PASSWORD", "123456")
+DB_HOST = settings.DATABASE_HOST if hasattr(settings, 'DATABASE_HOST') and settings.DATABASE_HOST else os.getenv("DATABASE_HOST", "localhost")
+DB_PORT = int(settings.DATABASE_PORT if hasattr(settings, 'DATABASE_PORT') and settings.DATABASE_PORT else os.getenv("DATABASE_PORT", "5432"))
 
 OLLAMA_URL = os.getenv("OLLAMA_BASE_URL")
 OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY", None)  # optional
@@ -52,9 +58,19 @@ logger = logging.getLogger(__name__)
 
 # ---------- Utilities ----------
 def pg_conn():
+    """Create a PostgreSQL connection using the configured database settings."""
+    logger.debug(f"Connecting to database: {DB_USER}@{DB_HOST}:{DB_PORT}/{DB_NAME}")
     conn = psycopg2.connect(
         dbname=DB_NAME, user=DB_USER, password=DB_PASSWORD, host=DB_HOST, port=DB_PORT
     )
+    # Verify connection by checking current database
+    with conn.cursor() as cur:
+        cur.execute("SELECT current_database() as db;")
+        actual_db = cur.fetchone()[0]
+        if actual_db != DB_NAME:
+            logger.warning(f"Connected to database '{actual_db}' but expected '{DB_NAME}'")
+        else:
+            logger.debug(f"Successfully connected to database: {actual_db}")
     return conn
 
 
@@ -72,8 +88,33 @@ def ensure_vector_table(conn, dim: int = EMBED_DIM, table_name: str = VECTOR_TAB
       created_at timestamptz default now()
     """
     with conn.cursor() as cur:
-        # Create vector extension if allowed
-        cur.execute("CREATE EXTENSION IF NOT EXISTS vector;")
+        # Check if vector extension exists first
+        # Try to check if extension exists, but if we can't query it, assume it exists
+        extension_exists = False
+        try:
+            cur.execute("SELECT EXISTS(SELECT 1 FROM pg_extension WHERE extname = 'vector');")
+            extension_exists = cur.fetchone()[0]
+        except Exception as e:
+            # If we can't check (permissions issue), assume extension exists and try to use it
+            logger.warning(f"Could not check if vector extension exists: {e}. Assuming it exists.")
+            extension_exists = True  # Assume it exists and try to proceed
+        
+        if not extension_exists:
+            # Try to create vector extension (requires superuser)
+            try:
+                cur.execute("CREATE EXTENSION IF NOT EXISTS vector;")
+                logger.info("Created pgvector extension")
+                extension_exists = True
+            except psycopg2.errors.InsufficientPrivilege:
+                logger.error("pgvector extension does not exist and cannot be created (requires superuser privileges).")
+                logger.error("Please run as superuser: CREATE EXTENSION vector;")
+                raise
+            except Exception as e:
+                logger.warning(f"Could not create vector extension: {e}")
+                # If CREATE EXTENSION fails but extension might exist, try to proceed anyway
+                logger.warning("Attempting to proceed - extension may already exist")
+        else:
+            logger.debug("pgvector extension already exists")
         # Create table with vector column dimension
         create_sql = f"""
         CREATE TABLE IF NOT EXISTS {table_name} (
@@ -361,44 +402,59 @@ def index_merged_text(merged_text: str, document_id: str = "local_doc", conn=Non
       - embed in batches
       - write to DB
     """
+    close_conn = False
     if conn is None:
         conn = pg_conn()
+        close_conn = True
 
-    ensure_vector_table(conn, dim=EMBED_DIM, table_name=VECTOR_TABLE)
+    try:
+        ensure_vector_table(conn, dim=EMBED_DIM, table_name=VECTOR_TABLE)
 
-    page_map = split_by_pages(merged_text)
-    all_chunks: List[Dict[str, Any]] = []
-    for pnum in sorted(page_map.keys()):
-        ptext = page_map[pnum]
-        chunks = page_to_chunks(pnum, ptext, document_id)
-        # annotate with a few heuristics: try to extract date mentions from chunk and normalize
-        for c in chunks:
-            # find 1-2 date-like substrings and normalize
-            found_dates = []
-            for m in re.findall(r"\b(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\b[^\n,]{0,30}|\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\b\d{1,2}\s+[A-Za-z]{3,9}\s+\d{2,4}\b", c["chunk_text"], flags=re.IGNORECASE):
-                norm = attempt_normalize_date(m)
-                if norm:
-                    found_dates.append({"raw": m, "normalized": norm})
-            if found_dates:
-                c["metadata"]["dates"] = found_dates
-            all_chunks.append(c)
+        page_map = split_by_pages(merged_text)
+        all_chunks: List[Dict[str, Any]] = []
+        for pnum in sorted(page_map.keys()):
+            ptext = page_map[pnum]
+            chunks = page_to_chunks(pnum, ptext, document_id)
+            # annotate with a few heuristics: try to extract date mentions from chunk and normalize
+            for c in chunks:
+                # find 1-2 date-like substrings and normalize
+                found_dates = []
+                for m in re.findall(r"\b(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\b[^\n,]{0,30}|\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\b\d{1,2}\s+[A-Za-z]{3,9}\s+\d{2,4}\b", c["chunk_text"], flags=re.IGNORECASE):
+                    norm = attempt_normalize_date(m)
+                    if norm:
+                        found_dates.append({"raw": m, "normalized": norm})
+                if found_dates:
+                    c["metadata"]["dates"] = found_dates
+                all_chunks.append(c)
 
-    logger.info(f"Prepared {len(all_chunks)} chunks from {len(page_map)} pages")
+        logger.info(f"Prepared {len(all_chunks)} chunks from {len(page_map)} pages")
 
-    # call embeddings in batches
-    texts = [c["chunk_text"] for c in all_chunks]
-    if not texts:
-        logger.info("No text to embed.")
-        return
+        # call embeddings in batches
+        texts = [c["chunk_text"] for c in all_chunks]
+        if not texts:
+            logger.info("No text to embed.")
+            return
 
-    embeddings = call_ollama_embeddings(texts, model=OLLAMA_MODEL, base_url=OLLAMA_URL, api_key=OLLAMA_API_KEY)
-    if len(embeddings) < len(texts):
-        # if mismatch, try to handle partial result or pad with zeros
-        logger.warning("Embeddings fewer than texts; padding with zero vectors")
-        while len(embeddings) < len(texts):
-            embeddings.append([0.0] * EMBED_DIM)
+        embeddings = call_ollama_embeddings(texts, model=OLLAMA_MODEL, base_url=OLLAMA_URL, api_key=OLLAMA_API_KEY)
+        if len(embeddings) < len(texts):
+            # if mismatch, try to handle partial result or pad with zeros
+            logger.warning("Embeddings fewer than texts; padding with zero vectors")
+            while len(embeddings) < len(texts):
+                embeddings.append([0.0] * EMBED_DIM)
 
-    upsert_chunks_with_embeddings(conn, VECTOR_TABLE, all_chunks, embeddings)
-    logger.info("Indexing complete.")
+        upsert_chunks_with_embeddings(conn, VECTOR_TABLE, all_chunks, embeddings)
+        
+        # Verify chunks were inserted
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT COUNT(*) as count FROM {VECTOR_TABLE} WHERE document_id = %s", (str(document_id),))
+            inserted_count = cur.fetchone()[0]
+            logger.info(f"Verified: {inserted_count} chunks inserted for document_id={document_id}")
+            if inserted_count != len(all_chunks):
+                logger.warning(f"Chunk count mismatch: expected {len(all_chunks)}, found {inserted_count}")
+        
+        logger.info("Indexing complete.")
+    finally:
+        if close_conn:
+            conn.close()
 
 
