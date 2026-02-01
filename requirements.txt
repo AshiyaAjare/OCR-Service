@@ -9,3 +9,11 @@ Pillow
 
 httpx
 pdfminer.six==20250324
+python-dotenv
+requests
+beautifulsoup4
+
+# Database
+sqlalchemy==1.4.53
+psycopg2-binary==2.9.9
+alembic==1.13.1
